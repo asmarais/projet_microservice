@@ -1,0 +1,5 @@
+platform:
+  config-repo:
+    status: available
+    sample-value: safe-local-default
+    message: "Hello from Config Server"

@@ -1,0 +1,46 @@
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: ${INVENTORY_DB_URL:jdbc:mysql://localhost:3306/inventory_db?createDatabaseIfNotExist=true&serverTimezone=UTC}
+    username: ${INVENTORY_DB_USERNAME:root}
+    password: ${INVENTORY_DB_PASSWORD:root}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  cloud:
+    openfeign:
+      client:
+        config:
+          product-service:
+            connectTimeout: 2000
+            readTimeout: 3000
+
+server:
+  port: ${INVENTORY_SERVICE_PORT:8083}
+
+eureka:
+  client:
+    register-with-eureka: true
+    fetch-registry: true
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICE_URL_DEFAULT_ZONE:http://localhost:8761/eureka/}
+  instance:
+    prefer-ip-address: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        readiness:
+          include: readinessState,db

@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build infrastructure (Maven Wrapper)",
+            "type": "shell",
+            "command": "${workspaceFolder}\\infrastructure\\mvnw.cmd",
+            "args": [
+                "compile"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}\\infrastructure"
+            },
+            "problemMatcher": [
+                "$maven"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}

@@ -40,26 +40,37 @@ supplier invoices as customer orders.
 | Monolith | `backend/`, Spring Boot 4.1.1, Java 21, Maven; default port 8089. Do not upgrade or change it as part of service extraction. |
 | Frontend | `frontend/`, Angular 21; development server defaults to port 4200 and uses relative `/api` URLs. |
 | Infrastructure | Independent Maven reactor in `infrastructure/`: Config Server, Eureka Discovery Server, and API Gateway. Java 21, Spring Boot 4.0.9, Spring Cloud 2025.1.4. |
-| Gateway | Port 8080; currently only the monolith fallback route `/api/**` → monolith port 8089, applying `StripPrefix=1`. Automatic discovery routes are disabled. |
+| Gateway | Port 8080; explicit `lb://` routes now exist for Product, Inventory, Supplier, User, Procurement, and Payment legacy prefixes, including the legacy recovery-rate URL routed to Payment; unmatched `/api/**` goes to the monolith fallback with `StripPrefix=1`. Automatic discovery routes remain disabled. Route configuration is not production cutover acceptance. |
 | Angular development proxy | `frontend/proxy.conf.json` forwards `/api` unchanged to `http://localhost:8080`; it does not strip `/api`. |
-| Product Service | A standalone project exists at `product-service/`, defaults to port 8082, and has CRUD API code, Flyway DDL, Config Client, and Eureka Client. Its Gateway cutover is intentionally deferred. |
-| Other business services | No service implementations are present in the repository for Inventory, Supplier, User, Procurement, or Payment. |
+| Product Service | Standalone `product-service/`, port 8082; Product/Category CRUD, Flyway, Config Client, and Eureka Client. Product stock assignment remains owned by Inventory. |
+| Inventory Service | Standalone `inventory-service/`, port 8083; stock CRUD/product assignment, Feign Product lookup, Flyway, Config Client, and Eureka Client. Advanced positions, movements, reservations, and receiving remain unimplemented. |
+| Supplier Service | Standalone `supplier-service/`, port 8084; supplier/sector CRUD, sector assignment, Procurement lookup, independent Flyway schema, Config Client, and Eureka Client. Performance projections remain unimplemented. |
+| User Service | Standalone `user-service/`, port 8085; operator CRUD and hashed credential storage, independent Flyway schema, Config Client, and Eureka Client. Authentication, tokens, roles/permissions, and authorization remain unimplemented. |
+| Procurement Service | Standalone `procurement-service/`, port 8086; invoice and line persistence, archive, operator assignment, product snapshots, and Feign Product/Supplier/User calls. Payment eligibility/total query endpoints are internal; Procurement does not call Payment. Inventory receiving, approved lifecycle, and Axon persistence remain unimplemented. |
+| Payment Service | Standalone `payment-service/`, port 8087; settlement CRUD/reporting with scalar invoice IDs, Feign Procurement eligibility/total lookups, and the legacy recovery-rate URL. Invoice eligibility rejects missing/archived invoices; amount-limit policy, idempotency/reconciliation, and auth remain unimplemented. |
 | Source database | The monolith uses MySQL and Hibernate `ddl-auto=update`; deployed DDL/data have not been verified. Entity-based table names below are inferences, not confirmed physical schema. |
 
-The initial connection path for local frontend development is:
+The local frontend path is now route-specific:
 
 ```text
 Angular :4200
   -> /api/** proxy unchanged
 API Gateway :8080
   -> StripPrefix=1
-Monolith :8089
+  -> matching explicit Eureka service route for configured legacy prefixes
+  -> otherwise monolith fallback :8089
 ```
 
-The Product Service currently does **not** receive Gateway traffic. In
-particular, the Gateway still forwards Product paths to the monolith. This
-avoids breaking the existing stock-assignment endpoint and product response
-compatibility while Inventory's contract is unresolved.
+Product, Inventory, Supplier, User, Procurement, and Payment route rules are
+present in `config-repo/api-gateway.yml`. This records configured routing, not
+validated service discovery, source-data parity, authentication, or an
+approved production cutover. The monolith remains operational as a fallback.
+
+All six business services have standalone `clean verify` evidence recorded in
+[`docs/MICROSERVICES-IMPLEMENTATION-STATUS.md`](docs/MICROSERVICES-IMPLEMENTATION-STATUS.md).
+The four new services' runtime endpoint tests use H2 with Flyway disabled;
+they do not replace MySQL migration/constraint testing or readiness checks
+against Config Server/Eureka.
 
 The baseline recorded 46 monolith REST endpoints and 38 backend tests, with
 one Testcontainers context-start error caused by Docker availability at that
@@ -120,12 +131,12 @@ Testcontainers/MySQL integration test has not completed in this environment.
 
 | Service | Responsibilities and owned data | Legacy entities / likely legacy tables | Public API responsibility | External IDs and dependencies | Explicit exclusions |
 |---|---|---|---|---|---|
-| **Product** (`product-service`) | Product catalog, categories, validation, current catalog price. | `Produit` / likely `produit`; `CategorieProduit` / likely `categorie_produit`. New target migration declares `products` and `product_categories`. | Preserve legacy `/produits/**` and `/categories-produits/**` contracts during a separately approved cutover. Current service implements Product and Category CRUD only. | Product IDs are consumed by Inventory and Procurement. Procurement needs an agreed catalog/price snapshot contract. | Stock quantities, stock/location assignment, reservations, movements, suppliers, invoices, settlements. No JPA link to Inventory. |
-| **Inventory** (`inventory-service`) | Stock positions/quantities, movements, and approved reservations/alerts. | `Stock` / likely `stock`; target position and movement tables are new and need design. The old model has one stock quantity and product-to-stock association; it does not prove a per-product position model. | Preserve `/stocks/**`; define product assignment, availability, movement, and receipt APIs with Product/Procurement owners. | Uses Product IDs as values; receives Product existence/details via REST as required. Procurement may issue an idempotent receipt/adjustment command only for an approved goods-receiving workflow. | Product metadata/pricing, supplier master, invoices, user credentials, settlements. |
-| **Supplier** (`supplier-service`) | Supplier master and activity sectors, supplier details, sector membership. | `Fournisseur` / likely `fournisseur`; `DetailFournisseur` / likely `detail_fournisseur`; `SecteurActivite` / likely `secteur_activite`; supplier-sector join table name unknown. | Preserve `/fournisseurs/**` and `/secteurs-activite/**`; define supplier lookup for Procurement. | Procurement references Supplier IDs and validates supplier data through REST. | Invoices, invoice lines, operators, stock, settlements. |
-| **User** (`user-service`) | Operator identities and approved authentication, roles, permissions, and account lifecycle. | `Operateur` / likely `operateur`. Auth/role tables do not exist in verified source evidence and need design. | Preserve `/operateurs/**` as an approved compatibility API; own identity/token-related APIs once security is approved. | Other services hold operator/approver IDs. Services validate JWTs locally when possible; avoid a User Service call for every request. | Invoice ownership/workflow, business records, product/inventory/supplier data, settlement history. Existing password storage is not evidence of secure hashing. |
-| **Procurement** (`procurement-service`) | Supplier invoices, invoice lines, purchasing workflow/approval lifecycle, and CQRS read/write models per approved design. | `Facture` / likely `facture`; `DetailFacture` / likely `detail_facture`; workflow/CQRS data is new. | Preserve `/facture/**`; invoice details currently have no standalone REST controller. Define internal APIs with consumers. | Product ID and immutable line snapshots; Supplier ID; operator/approver ID; Inventory only for an approved receipt workflow. Payment integration must avoid reciprocal call loops. | Supplier master, Product catalog, physical stock, credentials, settlement records. This is not a customer order service. |
-| **Payment** (`payment-service`) | Supplier-invoice settlements, payment history, reconciliation and payment-side audit. | `Reglement` / likely `reglement`; any invoice reference projection is new and requires approval. | Preserve `/reglements/**` and reporting routes as approved; define invoice eligibility lookup/command contracts. | References Procurement invoice IDs and uses REST to validate invoice/payment eligibility under an agreed workflow. | Procurement-owned invoices and workflow, Supplier master, product and stock data. |
+| **Product** (`product-service`) | Product catalog, categories, validation, current catalog price. | `Produit` / likely `produit`; `CategorieProduit` / likely `categorie_produit`. New target migration declares `products` and `product_categories`. | Product and Category CRUD only; `stockId` remains null and stock assignment is routed to Inventory. | Product IDs are consumed by Inventory and Procurement. Procurement needs an agreed catalog/price snapshot contract. | Stock quantities, stock/location assignment, reservations, movements, suppliers, invoices, settlements. No JPA link to Inventory. |
+| **Inventory** (`inventory-service`) | Current implementation covers stock CRUD and product assignment; broader positions/movements/reservations/receipts are incomplete. | `Stock` / likely `stock`; new target migration is service-owned. Deployed source model does not prove a per-product quantity model. | Implements legacy `/stocks/**` and Product stock-assignment operation. | Uses Product IDs as values and calls Product through Feign. Procurement receipt/adjustment remains conditional on approval. | Product metadata/pricing, supplier master, invoices, user credentials, settlements. |
+| **Supplier** (`supplier-service`) | Supplier master, details, sectors, and membership. | New target tables: `suppliers`, `supplier_details`, `activity_sectors`, and `supplier_activity_sectors`. | Implements `/fournisseurs/**`, `/secteurs-activite/**`, sector assignment, and `/internal/v1/suppliers/{id}`. | Procurement validates Supplier references through Feign. | Invoices, invoice lines, operators, stock, settlements, performance projections. |
+| **User** (`user-service`) | Operator profile data and encoded credential storage; authentication, roles, and permissions are not yet implemented. | New `operators` table; no source auth/role tables verified. Invoice assignments are Procurement-owned. | Implements `/operateurs/**` and `/internal/v1/operators/{id}`; `factureIds` remains present and empty. | Procurement validates operator references through Feign. No JWT or request authorization is active. | Invoice ownership/workflow, business records, product/inventory/supplier data, settlement history. |
+| **Procurement** (`procurement-service`) | Invoice headers/lines, archive status, local operator assignments, and internal invoice queries; Axon persistence/workflow is pending. | New `invoices`, `invoice_lines`, and `invoice_operator_assignments` tables. No data migration. | Keeps `/facture/**` invoice routes; optional legacy-shaped `detailsFacture` input persists line and Product snapshots. The Gateway sends the recovery-rate URL to Payment. | Feign to Product, Supplier, and User. No Inventory receipt call until a receiving contract is approved; no Payment call. | Supplier master, Product catalog, physical stock, credentials, settlement records. Not a customer-order service. |
+| **Payment** (`payment-service`) | Settlement tracking, revenue, and recovery-rate reporting; no reconciliation or event consumer yet. | New `settlements` table with scalar `invoice_id`, no cross-service FK. | Implements `/reglements/**`, `/internal/v1/settlements/revenue`, and the legacy recovery-rate path. Settlement writes require scalar `factureId` and validate invoice existence/archive state. | Feign to Procurement for eligibility and invoice totals; Procurement has no Payment Feign client, so the dependency is one-way. | Procurement-owned invoices/workflow, Supplier master, product and stock data. |
 
 Existing mappings and migration implications are summarized in
 [05-database-migration-inventory.md](docs/migration/05-database-migration-inventory.md).
@@ -175,18 +186,18 @@ Internal APIs should not be exposed through the public Gateway by default.
 | Caller → target | Business reason | Proposed request / response DTO | Error and availability behavior | Status |
 |---|---|---|---|---|
 | Inventory → Product | Check product identifier and retrieve catalog information needed for an inventory operation. | `GET /internal/v1/products/{productId}`; request path ID. Proposed `ProductReferenceResponse { productId, code, label }`; add lifecycle state only after Product ownership decides it. | `200` known ID; `404` unknown ID; `503`/timeout if Product is unavailable. Inventory must not silently treat an unavailable Product as valid or absent. | Required dependency in target; exact endpoint and fields pending. |
-| Procurement → Product | Validate invoice-line references and obtain the catalog snapshot needed at invoice creation. | `GET /internal/v1/products/{productId}` or a later batch equivalent; proposed `ProductForInvoiceResponse { productId, code, label, price, currency }`. Currency and price version are currently undefined. | `404` invalid Product; `503`/timeout is a visible dependency failure, not a fabricated success. Do not recalculate existing invoice-line snapshots from current price. | Required dependency; contract and monetary fields pending. |
+| Procurement → Product | Validate invoice-line references and capture the catalog fields used by an invoice line. | Implemented OpenFeign call to the existing `GET /produits/{productId}` returning `idProduit`, `codeProduit`, `libelleProduit`, `prix`, `stockId`, and `categorieProduitId`. The line stores these fields as a snapshot; amounts remain legacy `float`, with no currency field. | Product `404` maps to a visible invalid-reference `404`; downstream failures map to `503`. No Product entity or database is shared. | Implemented; live Eureka/provider integration not yet verified. |
 | Procurement → Supplier | Validate supplier and retrieve master data required for supplier invoices. | `GET /internal/v1/suppliers/{supplierId}`; proposed `SupplierReferenceResponse { supplierId, code, label, active }`. `active` requires lifecycle approval. | `404` unknown Supplier; `503`/timeout prevents actions requiring fresh validation. No database lookup across services. | Required dependency; exact route/fields pending. |
 | Procurement → Inventory | Record received goods or other explicitly approved stock operation. Invoice creation/approval alone must not change physical stock. | Proposed idempotent `POST /internal/v1/receipts` with `ReceiptRequest { idempotencyKey, invoiceId, lines: [{ productId, quantity }] }`; response `ReceiptResponse { receiptId, status }`. Quantity units and workflow trigger must be agreed. | Validate Product IDs; return a conflict for a duplicate key with the documented prior result; distinguish invalid references from timeout/unavailable Inventory. Do not retry non-idempotent commands without idempotency. | Conditional; only if a goods-receiving workflow is approved. |
-| Payment → Procurement | Retrieve invoice state and determine whether a settlement is eligible. | Proposed `GET /internal/v1/invoices/{invoiceId}/payment-eligibility`; response `InvoicePaymentEligibilityResponse { invoiceId, eligible, outstandingAmount, currency, reasonCode }`. Amount/currency/status contract pending. | `404` unknown invoice; `409` known but ineligible; `503`/timeout means do not accept settlement based on stale/guessed state. | Required relationship in the requested target; contract pending. |
+| Payment → Procurement | Validate invoice eligibility before settlement writes and query invoice totals for the recovery-rate report. | Implemented `GET /internal/v1/invoices/{invoiceId}/payment-eligibility` → `{ invoiceId, eligible, reasonCode }` and `GET /internal/v1/invoices/total?startDate=...&endDate=...` → `{ total }`. Eligibility currently means invoice exists and is not archived; outstanding amount/currency policy is not implemented. | `404` unknown invoice; `409` archived invoice; `503`/timeout or invalid response rejects the write/report rather than returning success. | Implemented Feign dependency; no live provider integration test yet. |
 | User → other services / Gateway | Issue/manage authentication-related information; consumers verify claims and authorize business operations. | JWT/JWKS or another issuer/key contract has not been selected. Do not invent token DTOs or trust caller-supplied identity headers. | Reject invalid/expired tokens according to the approved security model. User Service outage should not require a live per-request User call if token verification can be local. | Responsibility approved; security implementation pending. |
 
-The target architecture also sketches Procurement → Payment settlement
-commands/queries. This can create a reciprocal dependency with Payment →
-Procurement. Do not add both call directions by default. Procurement, Payment,
-and business owners must agree the authoritative command path, eligibility
-consistency, timeout behavior, and cycle-free workflow before implementing
-that additional relationship.
+The current recovery-rate compatibility path is routed by the Gateway to
+Payment, which queries Procurement for the invoice total and uses its own
+settlement data. Procurement has no reverse Payment dependency, avoiding a
+synchronous service cycle. Procurement → Inventory receiving remains
+deferred: the existing Inventory API has no receipt/quantity-adjustment
+contract, and invoice lines provide no approved receiving workflow.
 
 ### Feign, timeout, and failure standards
 
@@ -342,33 +353,43 @@ For each business service:
    Startup order is not readiness; the application must fail clearly if
    required configuration or database initialization is unavailable.
 
-The current Product Config Server document has a local `product_service`
-database URL default and requires credentials through
-`PRODUCT_DB_USERNAME` / `PRODUCT_DB_PASSWORD`. Provide real secrets outside
-Git. Do not start Product Service against an unapproved or shared database.
+Each service Config Server document now defines its logical database,
+environment-overridable URL/user/password, Hibernate validation, Flyway, and
+discovery settings. Set actual credentials outside Git. Product's database
+name remains `product_service` in its existing config; the revised logical
+target is `product_db`, so this naming difference must be reconciled before
+provisioning or cutover.
 
 ### Gateway and frontend compatibility
 
-The current Gateway route in `config-repo/api-gateway.yml` is only:
+`config-repo/api-gateway.yml` now contains explicit routes before the
+monolith fallback:
 
 ```text
-Path=/api/**
-  -> MONOLITH_BASE_URL (default http://localhost:8089)
-  -> StripPrefix=1
+/api/stocks/** and PUT /api/produits/*/stock/* -> INVENTORY-SERVICE
+/api/produits/** and /api/categories-produits/** -> PRODUCT-SERVICE
+/api/fournisseurs/** and /api/secteurs-activite/** -> SUPPLIER-SERVICE
+/api/operateurs/** -> USER-SERVICE
+/api/facture/** -> PROCUREMENT-SERVICE
+/api/facture/pourcentageRecouvrement/** -> PAYMENT-SERVICE (more-specific route)
+/api/reglements/** -> PAYMENT-SERVICE
+all other /api/** -> MONOLITH_BASE_URL (default http://localhost:8089)
 ```
 
-Add reviewed explicit routes for extracted services before the fallback, with
-service discovery (for example `lb://product-service`) and exactly one
-`StripPrefix=1`. Keep automatic discovery routing disabled. Preserve methods,
-queries, bodies, status codes, headers, and existing Angular paths. Unextracted
-domains continue to use the monolith fallback.
+Routes use Eureka `lb://` service IDs and exactly one `StripPrefix=1`;
+automatic discovery routing stays disabled. Config presence is not proof of
+service discovery, endpoint contract parity, security, or production
+cutover. The operator and payment routes must not be exposed outside a
+controlled development environment until identity/authorization, payment
+eligibility, and related workflows are approved and enforced.
 
 The current frontend proxy does not strip `/api`; the Gateway does it once.
 Do not add another rewrite in Angular or Gateway. Test both a collection path
 such as `/api/produits` and nested paths. Product and Category routes must not
-be added until Product data/cutover acceptance and the Inventory stock
-assignment/`stockId` compatibility contract are resolved. See the [Gateway
-configuration](config-repo/api-gateway.yml) and [frontend proxy](frontend/proxy.conf.json).
+be considered a completed data cutover until Product data acceptance and the
+Inventory stock-assignment/`stockId` compatibility contract are resolved.
+See the [Gateway configuration](config-repo/api-gateway.yml) and [frontend
+proxy](frontend/proxy.conf.json).
 
 ## 6. Database ownership and Flyway
 
@@ -389,10 +410,9 @@ configuration](config-repo/api-gateway.yml) and [frontend proxy](frontend/proxy.
 - The source schema has not been inspected. Inferred legacy names in the
   ownership table are not migration DDL. Inspect verified DDL, constraints,
   indexes, data, duplicates, and IDs before designing a backfill.
-- Product Service currently defines new target tables named `products` and
-  `product_categories` in its Flyway migration. These do not assert that the
-  source tables have those names. Other target database/table details remain
-  service design work.
+- Each service has a versioned target-owned V1 Flyway schema. These target
+  table names do not assert that legacy source tables have the same names.
+  Migration files are not validated against live MySQL in this environment.
 
 ### Flyway conventions
 
@@ -426,9 +446,11 @@ V3__add_product_price.sql
 - Keep migration credentials scoped to the service's own database. Never put
   secrets in scripts, logs, or Git.
 
-The Product Service's V1 DDL is implemented, but its Testcontainers test could
-not validate it against MySQL in the current environment. No source-to-target
-import has been executed. The import template in
+Product and Inventory `clean verify` passed; Product's MySQL Testcontainers
+test was skipped because Docker is unavailable. The four newly added services
+have embedded HTTP/JPA tests using H2 with Flyway disabled. No new-service V1
+migration has been validated against MySQL, and no source-to-target import has
+been executed. The import template in
 `product-service/scripts/migration/` is not an authorization to run it.
 
 ### Monetary values and quantities
@@ -508,11 +530,11 @@ and test each compatibility decision.
 ### Product-specific implementation status
 
 The standalone Product Service currently implements Product and Category
-CRUD (10 routes). It does not implement search or the legacy stock assignment
-route, and `stockId` is returned as `null`. The service is not yet a substitute
-for the monolith and is not routed by Gateway. Do not declare Product
-migration/cutover complete until source data, compatibility, integration, and
-rollback acceptance pass.
+CRUD (10 routes). It does not implement search or legacy stock assignment;
+`stockId` is returned as `null`, and Inventory owns the assignment route. The
+explicit Product/Category Gateway routes are configured, but neither a live
+route check nor source data parity/rollback acceptance has been performed.
+Do not declare Product migration/cutover complete until those gates pass.
 
 ## 8. Security and secrets
 
@@ -690,12 +712,12 @@ design. Agree contracts early so independent implementation can proceed.
 | Phase | Work | Dependencies / parallelism |
 |---|---|---|
 | 1 | Shared standards and team agreement | Agree service ownership, REST-only communication, security and data decision owners first. |
-| 2 | Product Service extraction | Implemented as a standalone CRUD service; migration validation, source data, Inventory compatibility, and Gateway cutover remain pending. |
-| 3 | Supplier Service extraction | Can develop in parallel with Product and User after its API/data boundary is agreed. |
-| 4 | User Service extraction | Can develop in parallel with Product and Supplier; token/security details remain a blocking cross-cutting decision for protected use. |
-| 5 | Inventory Service extraction | Depends on Product ID/reference contract; design can proceed in parallel, but integration needs Product contract agreement. |
-| 6 | Procurement Service extraction | Depends on Product and Supplier contracts; coordinate any receipt workflow with Inventory. Keep CQRS/Axon implementation Procurement-owned. |
-| 7 | Payment Service extraction | Depends on Procurement invoice and payment-eligibility contract. Avoid reciprocal request cycles. |
+| 2 | Product Service extraction | CRUD implementation and route config exist; MySQL/data validation, stock compatibility, and accepted cutover remain pending. |
+| 3 | Supplier Service extraction | CRUD, sector assignment, internal lookup, V1 schema, and route config implemented; MySQL validation/performance projections remain pending. |
+| 4 | User Service extraction | Operator CRUD and encoded credential storage implemented; auth/token/role policy blocks protected use and production routing. |
+| 5 | Inventory Service extraction | Stock CRUD, Product lookup/assignment, and route config exist; advanced position/movement/reservation/receipt model remains pending. |
+| 6 | Procurement Service extraction | Invoice header/assignment endpoints and Supplier/User/Payment Feign clients implemented; product snapshots, invoice lines, lifecycle, Inventory receipt, and Axon persistence remain pending. |
+| 7 | Payment Service extraction | Settlement/report APIs implemented; eligibility, archived-invoice projection, reconciliation/idempotency and security remain pending. |
 | 8 | Full inter-service integration | Add only approved synchronous REST clients; validate discovery, failures, deadlines, idempotency, and error propagation. |
 | 9 | Data migration and verification | Requires DBA-approved source schema/snapshot, target schema acceptance, stable ID strategy, reconciliation, and rollback. |
 | 10 | Security and authorization | Approve identity/token/key/service-auth model, then enforce at Gateway and service boundaries. |
@@ -705,7 +727,9 @@ design. Agree contracts early so independent implementation can proceed.
 | 14 | Gradual monolith retirement | Only after all domains are accepted, data ownership is cut over, and rollback/retention obligations are met. |
 
 Do not interpret the roadmap as authorization to create RabbitMQ/Kafka,
-change the Gateway, perform a data transfer, or retire the monolith.
+perform a data transfer, or retire the monolith. Gateway routes are configured
+for development/integration only and require route, security, and data
+acceptance before production use.
 
 ## 13. Architectural decision register
 
@@ -725,26 +749,26 @@ Status definitions:
 | Java 21 | APPROVED | New infrastructure and business-service baseline; monolith currently also configures Java 21. |
 | Spring Boot 4.0.9 for new Cloud services | APPROVED | Used by infrastructure and Product Service. Monolith remains on Boot 4.1.1. |
 | Spring Cloud 2025.1.4 | APPROVED | Used by infrastructure and Product Service BOMs. |
-| Independent build/deploy for each business service | APPROVED | Infrastructure reactor contains only platform apps; Product has a separate POM. |
+| Independent build/deploy for each business service | IMPLEMENTED | All six business services have separate POMs/wrappers and standalone clean-verify evidence; no service is in the infrastructure reactor. |
 | Independent database and no cross-service DB/JPA ownership | APPROVED | Target architecture/standards; source deployed schema remains unverified. |
-| Flyway | APPROVED | Product POM and V1 migration are present; common tool selected for new services. |
+| Flyway | IMPLEMENTED | All six business-service POMs include Flyway and their own V1 migration. MySQL migration execution is not proven for the new services. |
 | Synchronous inter-service REST; no RabbitMQ/Kafka | APPROVED | Required academic constraint. Supersedes earlier cross-service event-transport proposals. |
-| OpenFeign as default; `RestTemplate` as justified alternative | APPROVED | Required communication standard; no Feign client is currently present in Product Service. |
+| OpenFeign as default; `RestTemplate` as justified alternative | IMPLEMENTED | Inventory calls Product; Procurement calls Supplier, User, and Payment using Eureka IDs. The other services have no outbound clients. Product has no outbound client. |
 | Eureka service discovery | IMPLEMENTED | Eureka server module and client configuration are present; configured not to self-register/fetch. |
 | Config Server | IMPLEMENTED | Separate server module and Git-backed configuration repository are present. |
-| API Gateway | IMPLEMENTED | Separate WebFlux application; one monolith fallback route and disabled automatic routes are configured. |
+| API Gateway | IMPLEMENTED | Separate WebFlux application; explicit legacy routes for all six services precede the monolith fallback; automatic discovery routes are disabled. Runtime route/discovery and auth are not verified. |
 | Angular development proxy through Gateway | IMPLEMENTED | `proxy.conf.json` targets port 8080 and leaves `/api` intact. |
-| Product Service independent CRUD surface | IMPLEMENTED | Standalone POM, Product/Category CRUD code, Config Client/Eureka Client, Flyway V1, health/OpenAPI configuration. Gateway route and data cutover are not implemented. |
+| Product Service independent CRUD surface | IMPLEMENTED | Standalone POM, Product/Category CRUD code, Config Client/Eureka Client, Flyway V1, health/OpenAPI configuration. Gateway routes exist; data cutover is not implemented. |
 | Product MySQL schema integration | PENDING | Flyway migration test exists, but Docker/Testcontainers could not run; schema has not been validated against MySQL here. |
-| Product stock assignment / `stockId` compatibility | PENDING | Product currently returns `stockId: null`, omits assignment endpoint, and is not Gateway-routed. |
-| Exact inter-service endpoint and DTO contracts | PENDING | Proposed examples in Section 3 require provider/consumer approval. |
+| Product stock assignment / `stockId` compatibility | PENDING | Inventory serves the Gateway assignment route; Product currently returns `stockId: null`. End-to-end compatibility remains unaccepted. |
+| Supplier/User/Payment reference DTOs used by Procurement | IMPLEMENTED, provisional | Supplier and User internal lookup APIs and Payment internal revenue query exist; no provider/consumer integration test or production contract approval. Product lookup and Inventory receipt calls are still pending. |
 | JWT issuer, claims, key rotation, authorization, service identity | PENDING | No business security design is implemented by infrastructure evidence. |
 | Monetary conversion from legacy `float` | PENDING | `BigDecimal`/`DECIMAL(19,4)` is only a recommendation; Finance/data approval and source DDL required. |
 | Product/category code uniqueness and cross-service delete policy | PENDING | Product currently permits duplicates; local Category FK conflict maps to 409. |
 | Procurement CQRS/Axon implementation details | PENDING | Target architecture assigns CQRS/Axon, but storage/deployment and relationship to REST-only integration need detail. |
 | Resilience4j policies | PROPOSED | No project-wide policies/dependency are currently implemented. |
 | Distributed tracing/monitoring | PROPOSED | Prior architecture depicts observability; implementation/production policy is not established by this guide. |
-| Service port assignments other than current local defaults | PENDING | Product local default is 8082; deployment port/network map remains environment-specific. |
+| Local development ports | IMPLEMENTED | Product 8082, Inventory 8083, Supplier 8084, User 8085, Procurement 8086, Payment 8087. Deployment port/network map remains environment-specific. |
 
 ## 14. Contradictions, open decisions, and evidence limits
 
@@ -764,15 +788,17 @@ Status definitions:
 3. **Historical Gateway/proxy documentation vs actual configuration:** the
    baseline and initial platform design describe the old proxy directly to
    port 8089. The current proxy targets port 8080, preserves `/api`, and the
-   Gateway strips it once before forwarding to the monolith. The current
-   `config-repo/api-gateway.yml` still has only the monolith fallback.
+   Gateway strips it once. Explicit routes now cover all six business service
+   legacy path families before the monolith fallback; route configuration is
+   not production cutover acceptance.
 4. **Product design vs implementation:** the Product design is now marked
    approved/implemented, but explicitly defers source-data transfer and
    Gateway cutover. Product's `stockId` is null, its legacy assignment route
    is absent, and the MySQL migration integration test remains unverified.
 5. **Migration tooling:** earlier standards left Flyway/Liquibase selection
-   open. Flyway is now selected and present in Product Service. Do not infer
-   that other services have migrations until their files exist and tests run.
+   open. Flyway and V1 migrations now exist in all six business services.
+   The four new migrations have not been executed against MySQL, and none is
+   an instruction to transfer production data.
 
 ### Decisions and evidence still needed
 

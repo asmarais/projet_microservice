@@ -10,11 +10,10 @@ e-commerce application.
 > unchanged to the API Gateway. The current local
 > `config-repo/api-gateway.yml` adds Product and Category routes to
 > `lb://PRODUCT-SERVICE`; other `/api/**` requests fall back to the monolith.
-> Each route strips `/api` once. The Gateway config edit is currently
-> uncommitted in the nested `config-repo`, so Config Server may still serve its
-> last committed version until the intended config is committed and clients
-> are restarted. Product Service does not implement the legacy stock
-> assignment route, so that part of the Product UI is not yet compatible.
+> Each route strips `/api` once. The nested `config-repo` is initialized on
+> `main` and includes these routes. Restart config clients after configuration
+> changes. Product Service does not implement the legacy stock assignment
+> route, so that part of the Product UI is not yet compatible.
 
 ## Applications and local ports
 
@@ -105,9 +104,9 @@ git -C .\config-repo status --short
 ```
 
 The branch should be `main`. Config Server reads configuration from this
-Git-backed repository; review and commit the intended `api-gateway.yml` and
-`product-service.yml` changes before relying on them. **Do not stage unrelated
-edits or secrets.** Config clients load settings at startup; after changing
+Git-backed repository. Commit intended changes to `api-gateway.yml` and
+`product-service.yml` in the nested repository; **do not stage unrelated edits
+or secrets.** Config clients load settings at startup; after changing
 configuration, restart Config Server and the affected clients, then verify
 the served configuration. A fresh checkout with no nested Git repository
 should follow the initialization instructions in

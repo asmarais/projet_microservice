@@ -9,6 +9,24 @@ spring:
             locator:
               enabled: false
           routes:
+            # Inventory Service routes
+            - id: inventory-stock-service
+              order: -2
+              uri: lb://INVENTORY-SERVICE
+              predicates:
+                - Path=/api/stocks/**
+              filters:
+                - StripPrefix=1
+
+            - id: inventory-product-stock-assignment
+              order: -2
+              uri: lb://INVENTORY-SERVICE
+              predicates:
+                - Path=/api/produits/*/stock/*
+                - Method=PUT
+              filters:
+                - StripPrefix=1
+
             # Product Service routes
             - id: product-service
               order: -1
@@ -23,6 +41,57 @@ spring:
               uri: lb://PRODUCT-SERVICE
               predicates:
                 - Path=/api/categories-produits/**
+              filters:
+                - StripPrefix=1
+
+            # Supplier Service compatibility routes
+            - id: supplier-service
+              order: -2
+              uri: lb://SUPPLIER-SERVICE
+              predicates:
+                - Path=/api/fournisseurs/**
+              filters:
+                - StripPrefix=1
+
+            - id: activity-sector-service
+              order: -2
+              uri: lb://SUPPLIER-SERVICE
+              predicates:
+                - Path=/api/secteurs-activite/**
+              filters:
+                - StripPrefix=1
+
+            # Operator profile route; not a substitute for approved authentication.
+            - id: user-service
+              order: -2
+              uri: lb://USER-SERVICE
+              predicates:
+                - Path=/api/operateurs/**
+              filters:
+                - StripPrefix=1
+
+            # Procurement and payment legacy route families
+            - id: payment-recovery-rate-compatibility
+              order: -3
+              uri: lb://PAYMENT-SERVICE
+              predicates:
+                - Path=/api/facture/pourcentageRecouvrement/**
+              filters:
+                - StripPrefix=1
+
+            - id: procurement-service
+              order: -2
+              uri: lb://PROCUREMENT-SERVICE
+              predicates:
+                - Path=/api/facture/**
+              filters:
+                - StripPrefix=1
+
+            - id: payment-service
+              order: -2
+              uri: lb://PAYMENT-SERVICE
+              predicates:
+                - Path=/api/reglements/**
               filters:
                 - StripPrefix=1
 

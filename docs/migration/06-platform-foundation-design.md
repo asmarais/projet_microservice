@@ -1,8 +1,12 @@
 # Spring Cloud Platform Foundation Design
 
-**Status:** Design for approval only. No infrastructure applications, Maven
-files, Gateway routes, application source, or runtime configuration have been
-created or changed.
+**Design status:** This document records the original foundation design and
+its compatibility evidence; its initial "not implemented" statements below
+are historical. The repository now contains the Config Server, Eureka Server,
+WebFlux Gateway, Git-backed Config Server repository, and explicit routes for
+all six business-service path families. Current implementation evidence and
+verification limits are summarized in
+[`../MICROSERVICES-IMPLEMENTATION-STATUS.md`](../MICROSERVICES-IMPLEMENTATION-STATUS.md).
 
 This design supports the three infrastructure applications around the six
 business services in
@@ -232,10 +236,10 @@ Gateway until the frontend proxy is deliberately switched.
   must not make every registered service route public by default; expose
   reviewed routes only.
 
-## 7. Gateway routing strategy (design only)
+## 7. Gateway routing strategy and current implementation
 
-No route configuration is to be created yet. Preserve the existing REST paths
-at the public boundary and remove `/api` inside the Gateway before forwarding:
+Preserve the existing REST paths at the public boundary and remove `/api`
+inside the Gateway before forwarding:
 
 ```text
 Browser:  /api/produits/42
@@ -259,29 +263,27 @@ catch-all discovery locator. Keep the monolith fallback target externalized
 developer host, but usually incorrect from inside a container.
 
 Gateway routing is a migration bridge, not permission to change business
-behavior. Baseline contract and parity tests should be used for each route
-before switching its destination.
+behavior. `config-repo/api-gateway.yml` now has explicit Eureka routes for
+Product, Inventory, Supplier, User, Procurement, and Payment before the
+monolith fallback. Discovery route generation remains disabled. No live
+Gateway/Eureka verification or production cutover acceptance has been
+performed; the configured User and Payment routes are not safe for public
+production exposure before authentication/authorization and payment
+eligibility are approved.
 
 ## 8. Frontend compatibility strategy
 
-The Angular application currently calls relative `/api` URLs. The development
-proxy strips `/api` and targets backend port 8089, as recorded in
-[the baseline](./03-baseline-validation.md) and
-[the existing API contracts](./04-existing-api-contracts.md). Do not change
-Angular code or `frontend/proxy.conf.json` as part of this design task.
-
-When the Gateway is implemented and validated, change only the development
-proxy target from port 8089 to port 8080 and remove its `/api` rewrite. The
-Gateway then receives `/api/...` unchanged and performs the single prefix
-removal itself. Do not leave both proxy and Gateway stripping `/api`, which
-would turn e.g. `/api/produits` into an incorrect path. In deployed
-environments, send `/api` to the Gateway through the edge reverse proxy using
-the same single-strip behavior.
+The Angular application calls relative `/api` URLs. The development proxy
+targets Gateway port 8080 and forwards `/api` unchanged; Gateway performs the
+single prefix removal. This is the current configuration in
+`frontend/proxy.conf.json` and `config-repo/api-gateway.yml`. Do not change
+Angular code or its proxy as part of this service extraction.
 
 Keep client-visible URLs, request/response shapes, and status codes stable
-through extraction. Direct access to the monolith on 8089 can remain available
-for controlled troubleshooting, but the normal frontend path should move to
-the Gateway only after fallback routing and health checks pass.
+through extraction. Direct access to the monolith on 8089 remains the
+configured fallback/troubleshooting destination. The proxy now points to the
+Gateway, but full fallback/health, service discovery, security, and route
+contract checks remain to be completed before production use.
 
 ## 9. Risks and implementation recommendations
 

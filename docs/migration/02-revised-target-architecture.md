@@ -1,7 +1,16 @@
 # Revised Target Architecture: Six Purchasing Microservices
 
-**Status:** Architecture proposal for approval; no code or Spring Boot projects
-have been created.
+**Architecture status:** Revised six-service purchasing boundaries and
+platform decisions remain the target design; diagrams describe intended
+ownership, not proof of runtime integration or production readiness.
+
+**Implementation evidence (2026-11-17):** Standalone Product, Inventory,
+Supplier, User, Procurement, and Payment projects now exist. Independent
+build/test evidence, local ports, configured routes, implemented endpoints,
+and unresolved cutover gaps are tracked in
+[`../MICROSERVICES-IMPLEMENTATION-STATUS.md`](../MICROSERVICES-IMPLEMENTATION-STATUS.md).
+No production data has been migrated, and Gateway route configuration does
+not mean any service is an accepted authoritative replacement.
 
 This document supersedes the proposed service boundaries in
 [`01-current-architecture-analysis.md`](./01-current-architecture-analysis.md).
@@ -128,17 +137,18 @@ The solid arrows represent bounded REST interactions, normally implemented
 with OpenFeign. Dotted arrows are asynchronous facts used to build projections.
 Supplier performance is computed from its own supplier master data plus
 procurement and settlement facts; supplier-service does not synchronously call
-procurement or payment. Payment may use invoice facts from its event-fed local
-projection instead of calling procurement for every settlement.
+procurement or payment. A durable event-fed Payment invoice projection remains
+a possible future replacement for the implemented synchronous eligibility and
+aggregate reads, subject to an approved transport and consistency policy.
 
-There is a possible REST dependency cycle if procurement synchronously asks
-payment for settlement data while payment synchronously asks procurement to
-validate each invoice. Avoid that pattern: publish invoice-created/updated/
-approved/cancelled events from procurement, maintain an idempotent invoice
-reference projection in payment, and let payment emit settlement events. The
-existing recovery-rate endpoint can use an event-fed reporting projection or
-a deliberately bounded payment query; it must not recreate shared-database
-joins.
+Avoid reciprocal synchronous dependencies between Procurement and Payment.
+The implemented direction is Payment → Procurement: Payment validates invoice
+eligibility before settlement writes and reads invoice totals for recovery
+reporting; Procurement does not call Payment. The Gateway preserves the legacy
+`/facture/pourcentageRecouvrement/{startDate}/{endDate}` URL while routing it
+to Payment. Eligibility currently means that the invoice exists and is not
+archived; outstanding-balance and currency rules remain undefined. Durable
+invoice/settlement events and reconciliation are still future work.
 
 Inventory reservations are a distinct stock-allocation capability. A supplier
 invoice or approval must not automatically reserve existing stock or increase
@@ -343,11 +353,13 @@ and query models. Existing invoice creation/cancellation and amount behavior
 must first be captured by characterization tests and preserved; approval
 workflows are new behavior and require explicit acceptance criteria.
 
-**Dependencies:** OpenFeign to product, inventory, supplier, user, and
-payment contracts as listed in Section 5. Publish invoice lifecycle facts for
-payment reconciliation and supplier performance. Use Axon command/event
-handling for procurement consistency; do not imply that Axon supplies
-cross-service ACID transactions.
+**Dependencies:** OpenFeign to Product, Supplier, and User. Inventory
+receiving is deferred until its command and confirmed-receipt workflow are
+approved. Procurement exposes internal invoice eligibility and total queries
+for Payment and does not synchronously call Payment. Publish invoice lifecycle
+facts for reconciliation and supplier performance after a durable event
+transport is approved. Use Axon command/event handling for procurement
+consistency; do not imply that Axon supplies cross-service ACID transactions.
 
 ### 2.6 `payment-service`
 
@@ -365,9 +377,10 @@ of supplier invoices, not customer checkout or a card payment gateway.
 - `reglements/services/IReglementService.java`,
   `reglements/services/ReglementServiceImpl.java`
 - `reglements/exceptions/ReglementNotFoundException.java`
-- The recovery-rate calculation in `FactureServiceImpl` is not owned by this
-  service; retain the old procurement reporting contract through a projection
-  or a deliberate internal payment query.
+- The legacy recovery-rate URL is served by a Payment compatibility endpoint
+  and obtains active invoice totals from Procurement through an internal
+  query. The Gateway retains the old browser URL; Procurement does not call
+  Payment.
 
 **Database ownership:** Settlement/payment-tracking records, reconciliation
 batches, and payment audit. Replace `Reglement.facture` JPA mapping with an
@@ -468,7 +481,8 @@ the monolith. Do not expose service hostnames directly to the browser.
 | `/fournisseurs/**` | `supplier-service` | Preserve supplier CRUD and sector assignment |
 | `/secteurs-activite/**` | `supplier-service` | Preserve although not in the abbreviated compatibility list; Angular uses it |
 | `/operateurs/**` | `user-service` | Preserve operator administration paths; require approved staff auth policy |
-| `/facture/**` | `procurement-service` | Preserve existing supplier-invoice route spellings and behavior |
+| `/facture/pourcentageRecouvrement/**` | `payment-service` | Preserve this legacy reporting URL through a more-specific Gateway route; Payment queries Procurement totals |
+| `/facture/**` | `procurement-service` | Preserve the remaining supplier-invoice route spellings and behavior |
 | `/reglements/**` | `payment-service` | Preserve settlement list/detail/delete, invoice lookup, and revenue routes |
 
 Gateway should maintain separate explicit routes for each prefix rather than
@@ -477,6 +491,13 @@ date formatting, and legacy response serialization. Route `/api/**` only if a
 specific fallback strategy is defined. The Gateway should not aggregate
 multi-service write transactions or conceal service failures with fabricated
 success responses.
+
+**Repository routing status:** `config-repo/api-gateway.yml` now contains
+explicit Eureka routes for each of the six legacy path families above, then
+retains the `/api/**` monolith fallback. The rule has not been validated
+against a running Eureka/Gateway/service environment. User and Payment
+routes remain development/integration configuration only until authentication,
+authorization, and payment eligibility/reporting contracts are accepted.
 
 ### 4.2 Cutover sequence
 
@@ -508,11 +529,11 @@ design, not implemented APIs.
 
 | Caller → owner | Suggested request/response contract | Purpose |
 |---|---|---|
-| procurement → product | `GET /internal/v1/products/{productId}` → product ID, code, label, active state, current price/currency/version; optionally a batch endpoint | Resolve invoice-line products and capture a snapshot |
+| procurement → product | Implemented OpenFeign call to the existing `GET /produits/{productId}` → `idProduit`, `codeProduit`, `libelleProduit`, `prix`, `stockId`, `categorieProduitId` | Resolve line products and store the returned snapshot; no currency/version fields are currently available |
 | procurement → supplier | `GET /internal/v1/suppliers/{supplierId}` → supplier ID, active state, required purchasing terms | Validate supplier reference |
 | procurement → inventory | If receiving is approved as a business workflow: `POST /internal/v1/receipts` with idempotency key, invoice/workflow ID, product IDs, received quantities; inventory returns the recorded receipt/movement. Reservation commands are a separate inventory contract. | Update inventory only after confirmed receipt; do not reserve existing stock or imply receipt from invoice approval |
 | procurement → user | `GET /internal/v1/operators/{operatorId}` or an authorization-aware equivalent → active operator/role summary | Validate operator assignment or approver eligibility |
-| procurement → payment | `POST /internal/v1/settlements` with invoice ID, amount, currency, date, external reference, idempotency key; query settlement history by invoice ID | Record/query invoice settlement without a DB relation |
+| payment → procurement | Implemented `GET /internal/v1/invoices/{invoiceId}/payment-eligibility` → `{ invoiceId, eligible, reasonCode }`; `GET /internal/v1/invoices/total?startDate=...&endDate=...` → `{ total }` | Fail closed for missing/archived invoices and obtain report denominator; no cross-service database access |
 | Gateway → user | Existing `/operateurs/**`; new `/auth/**` and `/internal/v1/...` APIs as needed | Staff management and authentication |
 | Gateway → each owner | Existing public route families in Section 4; optional new `/api/v1/...` routes | Preserve browser contract and add versioned capabilities |
 
@@ -664,8 +685,8 @@ characterization tests and contract comparisons before moving write ownership.
    behavior remains testable and recoverable.
 8. **Extract `payment-service`.** Move settlement history and invoice
    references, verify reconciliation totals, route `/reglements`, and publish
-   settlement facts. Replace recovery-rate direct calls with an agreed
-   projection/query contract.
+   settlement facts. Preserve the recovery-rate URL via Payment and query
+   Procurement's active invoice total in the Payment → Procurement direction.
 9. **Verify and retire deliberately.** Run end-to-end frontend/Postman
    compatibility tests and failure/retry/reconciliation tests. Compare source
    and target row counts, invoice totals, settlement totals, and representative
@@ -682,7 +703,9 @@ an unsecured production interval.
 
 1. **Business behavior preservation:** Current APIs have documented
    limitations, including settlement POST/PUT validation failure and an
-   invoice recovery-rate endpoint that converts any exception to zero.
+   legacy monolith recovery-rate endpoint that converts any exception to zero.
+   The Gateway-routed microservice compatibility endpoint instead reports
+   Procurement failures as `503`; confirm that behavior change before cutover.
    Capture these as current behavior; do not silently fix them during
    extraction. Improvements require a separate approved behavior change.
 2. **Stock data meaning:** `Stock.qte` is attached to a stock record while a
@@ -746,3 +769,38 @@ an unsecured production interval.
 - [Spring Cloud supported release trains and Boot compatibility](https://spring.io/projects/spring-cloud#overview)
 - [Spring Cloud 2025.1 release notes](https://github.com/spring-cloud/spring-cloud-release/wiki/Spring-Cloud-2025.1-Release-Notes)
 - [Axon Framework Spring Boot integration compatibility](https://docs.axoniq.io/axon-framework-reference/5.1/spring-boot-integration/)
+
+## 11. Current implementation evidence
+
+The target architecture above is not a claim that all target behavior is
+complete. As of 2026-11-17:
+
+- All six business services have independent Maven projects. The four newly
+  added services follow the Java 21 / Spring Boot 4.0.9 / Spring Cloud
+  2025.1.4 baseline and each owns a Flyway V1 schema and logical MySQL DB.
+- Product and Inventory were left unchanged. Their existing Gateway route
+  rules remain present; Product's stock assignment is still implemented by
+  Inventory and Product still returns a null `stockId`.
+- Supplier exposes supplier/sector CRUD, sector assignment, and a
+  Procurement reference lookup. Supplier performance projections remain
+  blocked on event/metric definitions.
+- User exposes operator CRUD/reference lookup and stores encoded password
+  verifiers. It does not issue or validate tokens, define roles/permissions,
+  or authorize API requests; the Gateway operator route is not safe for
+  public production use.
+- Procurement exposes existing invoice-header paths, local operator
+  assignment, supplier lookup, recovery-rate reporting, and Feign calls to
+  Supplier, User, and Payment. Invoice details remain empty because legacy
+  create did not persist submitted lines. Product snapshots, receiving,
+  workflow/approval, durable events, and Axon persistence are incomplete.
+- Payment exposes settlement/reporting endpoints and a scalar invoice ID,
+  without a Procurement call. Invoice eligibility, idempotency, durable
+  lifecycle projections, reconciliation, and archived-invoice exclusion
+  from revenue remain unresolved.
+- Explicit Gateway routes now target all six business services through
+  Eureka and retain the monolith fallback. No live Gateway/Eureka route or
+  MySQL migration verification was performed; no production data was moved.
+
+The per-service ports, databases, endpoint lists, dependencies, Gateway
+predicates, test commands/results, and detailed blockers are maintained in
+[`../MICROSERVICES-IMPLEMENTATION-STATUS.md`](../MICROSERVICES-IMPLEMENTATION-STATUS.md).

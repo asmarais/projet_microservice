@@ -37,27 +37,32 @@ remains on Boot 4.1.1 and is not included in this reactor.
 
 ## Configuration repository
 
-Config Server reads the local Git working tree at `config-repo/`, on branch
-`main`. The sample `application.yml`, `discovery-server.yml`, and
-`api-gateway.yml` contain only safe defaults; never store passwords, tokens,
-private keys, or environment secrets in this repository.
+Config Server reads the nested Git repository at `config-repo/`, on branch
+`main`. The YAML files contain local-development defaults; never store
+passwords, tokens, private keys, or environment secrets in this repository.
 
-The repository is initialized for this workspace. To create it in a fresh
-checkout, run these commands from the repository root:
+The nested repository's `.git` metadata is not included in the root checkout.
+If it does not exist, initialize it and commit the configuration profiles
+from the repository root:
 
 ```powershell
-git -C .\config-repo init -b main
-git -C .\config-repo add application.yml discovery-server.yml api-gateway.yml
-git -C .\config-repo -c user.name="Local Config Repository" -c user.email="config-repo@localhost" commit -m "Add local infrastructure configuration"
+if (-not (Test-Path .\config-repo\.git)) {
+    git -C .\config-repo init -b main
+}
+git -C .\config-repo add -- '*.yml'
+git -C .\config-repo -c user.name="Local Config Repository" -c user.email="config-repo@localhost" commit -m "Add local configuration profiles"
 ```
 
-If Git reports that the branch or repository already exists, do not
-reinitialize it. Check `git -C .\config-repo status` and confirm the three
-configuration files are committed on `main`. To use another local Git
-repository, set
+If the repository already exists, do not reinitialize it. Check
+`git -C .\config-repo status` and confirm the required configuration files are
+committed on `main`. To use another local Git repository, set
 `CONFIG_REPO_URI` to its JGit-compatible `file:` URI for Config Server.
 
 ## Build and test
+
+The workspace's default build task uses the Maven Wrapper, so a global Maven
+installation is not required. In VS Code, run **Build > Build Task** or press
+`Ctrl+Shift+B`.
 
 Run from the repository root:
 
